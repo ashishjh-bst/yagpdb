@@ -1,0 +1,16 @@
+[psql]
+dbname = "your_db_name"
+user = "your_db_user"
+pass = "your_db_password"
+host = "localhost"
+port = 5432
+sslmode = "disable"
+
+[psql.schema]
+whitelist = ["public"]
+
+[psql.tables]
+include = ["twitch_channel_subscriptions", "twitch_announcements"]
+
+[psql.output]
+dir = "models" 
