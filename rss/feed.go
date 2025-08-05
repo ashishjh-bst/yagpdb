@@ -460,6 +460,15 @@ func (p *Plugin) OnRemovedPremiumGuild(guildID int64) error {
 	return nil
 }
 
+func (p *Plugin) Status() (string, string) {
+	feeds, err := models.RSSFeedSubscriptions(models.RSSFeedSubscriptionWhere.Enabled.EQ(true)).CountG(context.Background())
+	if err != nil {
+		logger.WithError(err).Error("Failed Checking RSS feeds")
+		return "Total Feeds", "error"
+	}
+	return "Total Feeds", fmt.Sprintf("%d", feeds)
+}
+
 func RegisterPlugin() {
 	common.InitSchemas("rss", DBSchemas...)
 	plugin := &Plugin{}
