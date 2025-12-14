@@ -96,7 +96,7 @@ func MessageComponentFromJSON(b []byte) (MessageComponent, error) {
 }
 
 type UnknownComponent struct {
-	MessageComponent
+	TopLevelComponent
 }
 
 // TopLevelComponent is an interface for message components which can be used on the top level of a message.
