@@ -225,7 +225,7 @@ func (p *Plugin) AddCommands() {
 
 			isAdminsOnlyCurrently := isTicketAdminOnly(conf, currentTicket, parsed.GuildData.CS)
 			if !isAdminsOnlyCurrently {
-				_, err := setTicketAdminOnly(conf, parsed.GuildData.CS)
+				_, err := setTicketAdminOnly(conf, currentTicket, parsed.GuildData.CS)
 				if err != nil {
 					return "Failed to make ticket admin only", err
 				}
@@ -660,7 +660,7 @@ func createTXTTranscript(ticket *models.Ticket, msgs []*discordgo.Message) *byte
 	return &buf
 }
 
-func unsetTicketAdminOnly(conf *models.TicketConfig, currentTicket *Ticket, cs *dstate.ChannelState) (string, error) {
+func setTicketAdminOnly(conf *models.TicketConfig, currentTicket *Ticket, cs *dstate.ChannelState) (string, error) {
 	isThreadedTicket := cs.Type == discordgo.ChannelTypeGuildPrivateThread
 	if !isThreadedTicket {
 		modOverwrites := make([]discordgo.PermissionOverwrite, 0)
@@ -682,7 +682,7 @@ func unsetTicketAdminOnly(conf *models.TicketConfig, currentTicket *Ticket, cs *
 				return "", err
 			}
 		}
-		return "Removed all mod roles from the ticket, ticket is no longer admin only.", nil
+		return "All mods roles removed, ticket is now admin only.", nil
 	}
 	lastMemberID := ""
 	memberList := make([]*discordgo.ThreadMember, 0)
@@ -699,36 +699,30 @@ func unsetTicketAdminOnly(conf *models.TicketConfig, currentTicket *Ticket, cs *
 		lastMemberID = discordgo.StrID(nextMemberlist[len(nextMemberlist)-1].ID)
 	}
 
-	participants := make(map[int64]*models.TicketParticipant)
-	for _, v := range currentTicket.Participants {
-		participants[v.UserID] = v
-	}
-
 	for _, v := range memberList {
-		_, isParticipant := participants[v.UserID]
 		isAuthor := v.UserID == currentTicket.Ticket.AuthorID
 		isBot := v.UserID == common.BotUser.ID
-		if isParticipant || isAuthor || isBot {
+		isAdmin := common.ContainsInt64SliceOneOf(v.Member.Roles, conf.AdminRoles)
+		isMod := common.ContainsInt64SliceOneOf(v.Member.Roles, conf.ModRoles)
+		if isAuthor || isBot || isAdmin || !isMod {
 			continue
 		}
-		if common.ContainsInt64SliceOneOf(v.Member.Roles, conf.ModRoles) {
-			err := common.BotSession.ThreadMemberRemove(cs.ID, discordgo.StrID(v.UserID))
-			if err != nil {
-				logger.WithError(err).WithField("guild", cs.GuildID).Error("[tickets] failed to remove thread member")
-				return "", err
-			}
+		err := common.BotSession.ThreadMemberRemove(cs.ID, discordgo.StrID(v.UserID))
+		if err != nil {
+			logger.WithError(err).WithField("guild", cs.GuildID).Error("[tickets] failed to remove thread member")
+			return "", err
 		}
 	}
 
-	return "Removed all mod roles from the ticket, ticket is no longer admin only.", nil
+	return "All mods removed, ticket is now admin only.", nil
 }
 
-func setTicketAdminOnly(conf *models.TicketConfig, cs *dstate.ChannelState) (string, error) {
+func unsetTicketAdminOnly(conf *models.TicketConfig, currentTicket *Ticket, cs *dstate.ChannelState) (string, error) {
 	isThreadedTicket := cs.Type == discordgo.ChannelTypeGuildPrivateThread
 	response := ""
 	if isThreadedTicket {
 		var mentions strings.Builder
-		mentions.WriteString("Added the following roles to the ticket: ")
+		mentions.WriteString("Adding the mod roles back to the ticket: ")
 		for _, roleID := range conf.ModRoles {
 			mentions.WriteString(" <@&" + strconv.FormatInt(roleID, 10) + ">")
 		}
@@ -767,7 +761,7 @@ func setTicketAdminOnly(conf *models.TicketConfig, cs *dstate.ChannelState) (str
 				logger.WithError(err).WithField("guild", cs.GuildID).Error("[tickets] failed to add channel overwrite")
 				return "", err
 			}
-			response = "Ticket is now admin only, added all mod roles to the ticket."
+			response = "Added all mod roles back to the ticket."
 		}
 	}
 
@@ -823,6 +817,44 @@ func createTicketThread(conf *models.TicketConfig, gs *dstate.GuildSet, authorID
 	err = common.BotSession.ThreadMemberAdd(channel.ID, discordgo.StrID(authorID))
 	if err != nil {
 		logger.WithError(err).Error("Failed adding user to thread")
+	}
+
+	// add all the mod and admin roles
+	var modMention strings.Builder
+	modMention.WriteString("Added the following mod roles to the ticket: ")
+	for _, v := range conf.ModRoles {
+		modMention.WriteString(" <@&" + strconv.FormatInt(v, 10) + ">")
+	}
+	message := &discordgo.MessageSend{
+		Content: modMention.String(),
+		AllowedMentions: discordgo.AllowedMentions{
+			Roles: discordgo.IDSlice(conf.ModRoles),
+		},
+	}
+	_, err = common.BotSession.ChannelMessageSendComplex(channel.ID, message)
+	if err != nil {
+		logger.WithError(err).WithField("guild", gs.ID).Error("[tickets] failed to send message to thread")
+		return 0, nil, err
+	}
+
+	// add admin roles
+	var adminMention strings.Builder
+	adminMention.WriteString("Added the following admin roles to the ticket: ")
+	for _, v := range conf.AdminRoles {
+		adminMention.WriteString(" <@&" + strconv.FormatInt(v, 10) + ">")
+	}
+
+	message = &discordgo.MessageSend{
+		Content: adminMention.String(),
+		AllowedMentions: discordgo.AllowedMentions{
+			Roles: discordgo.IDSlice(conf.AdminRoles),
+		},
+	}
+
+	_, err = common.BotSession.ChannelMessageSendComplex(channel.ID, message)
+	if err != nil {
+		logger.WithError(err).WithField("guild", gs.ID).Error("[tickets] failed to send message to thread")
+		return 0, nil, err
 	}
 
 	return id, channel, nil
