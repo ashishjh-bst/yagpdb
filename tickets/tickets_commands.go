@@ -216,7 +216,6 @@ func (p *Plugin) AddCommands() {
 		Aliases:     []string{"adminonly", "ao"},
 		Description: "Toggle admins only mode for this ticket",
 		RunFunc: func(parsed *dcmd.Data) (any, error) {
-
 			conf := parsed.Context().Value(CtxKeyConfig).(*models.TicketConfig)
 			currentTicket := parsed.Context().Value(CtxKeyCurrentTicket).(*Ticket)
 			if len(conf.ModRoles) == 0 {
@@ -225,16 +224,19 @@ func (p *Plugin) AddCommands() {
 
 			isAdminsOnlyCurrently := isTicketAdminOnly(conf, currentTicket, parsed.GuildData.CS)
 			if !isAdminsOnlyCurrently {
-				_, err := setTicketAdminOnly(conf, currentTicket, parsed.GuildData.CS)
+				resp, err := setTicketAdminOnly(conf, currentTicket, parsed.GuildData.CS)
 				if err != nil {
 					return "Failed to make ticket admin only", err
 				}
 				currentTicket.Ticket.IsAdminOnly = true
-				currentTicket.Ticket.UpdateG(context.Background(), boil.Whitelist("is_admin_only"))
-				return "Ticket Set to Admin Only", nil
+				_, err = currentTicket.Ticket.UpdateG(context.Background(), boil.Whitelist("is_admin_only"))
+				if err != nil {
+					return "Failed to update ticket admin only", err
+				}
+				return resp, nil
 			}
 
-			resp, err := unsetTicketAdminOnly(conf, currentTicket, parsed.GuildData.CS)
+			resp, err := unsetTicketAdminOnly(conf, parsed.GuildData.CS)
 			if err != nil {
 				return "Failed to remove admin only from tickets", err
 			}
@@ -717,18 +719,16 @@ func setTicketAdminOnly(conf *models.TicketConfig, currentTicket *Ticket, cs *ds
 	return "All mods removed, ticket is now admin only.", nil
 }
 
-func unsetTicketAdminOnly(conf *models.TicketConfig, currentTicket *Ticket, cs *dstate.ChannelState) (string, error) {
+func unsetTicketAdminOnly(conf *models.TicketConfig, cs *dstate.ChannelState) (string, error) {
 	isThreadedTicket := cs.Type == discordgo.ChannelTypeGuildPrivateThread
-	response := ""
 	if isThreadedTicket {
 		var mentions strings.Builder
 		mentions.WriteString("Adding the mod roles back to the ticket: ")
 		for _, roleID := range conf.ModRoles {
 			mentions.WriteString(" <@&" + strconv.FormatInt(roleID, 10) + ">")
 		}
-		response = mentions.String()
 		message := &discordgo.MessageSend{
-			Content: response,
+			Content: mentions.String(),
 			AllowedMentions: discordgo.AllowedMentions{
 				Roles: discordgo.IDSlice(conf.ModRoles),
 			},
@@ -761,11 +761,11 @@ func unsetTicketAdminOnly(conf *models.TicketConfig, currentTicket *Ticket, cs *
 				logger.WithError(err).WithField("guild", cs.GuildID).Error("[tickets] failed to add channel overwrite")
 				return "", err
 			}
-			response = "Added all mod roles back to the ticket."
+
 		}
 	}
 
-	return response, nil
+	return "Added all mod roles back to the ticket.", nil
 }
 
 func isTicketAdminOnly(conf *models.TicketConfig, currentTicket *Ticket, cs *dstate.ChannelState) bool {
