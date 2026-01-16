@@ -241,7 +241,10 @@ func (p *Plugin) AddCommands() {
 				return "Failed to remove admin only from tickets", err
 			}
 			currentTicket.Ticket.IsAdminOnly = false
-			currentTicket.Ticket.UpdateG(context.Background(), boil.Whitelist("is_admin_only"))
+			_, err = currentTicket.Ticket.UpdateG(context.Background(), boil.Whitelist("is_admin_only"))
+			if err != nil {
+				return "Failed to update ticket admin only", err
+			}
 			return resp, nil
 		},
 	}
