@@ -22,6 +22,39 @@ import (
 var _ bot.BotInitHandler = (*Plugin)(nil)
 var _ commands.CommandProvider = (*Plugin)(nil)
 
+var timezoneAbbreviationMap = map[string]string{
+	"GMT":  "Etc/GMT",
+	"WET":  "Europe/Lisbon",
+	"CET":  "Europe/Berlin",
+	"EET":  "Europe/Helsinki",
+	"MSK":  "Europe/Moscow",
+	"AST":  "America/Halifax",
+	"EST":  "America/New_York",
+	"CST":  "America/Chicago",
+	"MST":  "America/Denver",
+	"PST":  "America/Los_Angeles",
+	"AKST": "America/Anchorage",
+	"HST":  "Pacific/Honolulu",
+	"IST":  "Asia/Kolkata",
+	"PKT":  "Asia/Karachi",
+	"JST":  "Asia/Tokyo",
+	"KST":  "Asia/Seoul",
+	"HKT":  "Asia/Hong_Kong",
+	"SGT":  "Asia/Singapore",
+	"WIB":  "Asia/Jakarta",
+	"WITA": "Asia/Makassar",
+	"WIT":  "Asia/Jayapura",
+	"AEST": "Australia/Sydney",
+	"ACST": "Australia/Adelaide",
+	"AWST": "Australia/Perth",
+	"NZST": "Pacific/Auckland",
+	"SAST": "Africa/Johannesburg",
+	"EAT":  "Africa/Nairobi",
+	"CAT":  "Africa/Harare",
+	"BRT":  "America/Sao_Paulo",
+	"ART":  "America/Argentina/Buenos_Aires",
+}
+
 func (p *Plugin) BotInit() {
 	eventsystem.AddHandlerAsyncLastLegacy(p, p.handleMessageCreate, eventsystem.EventMessageCreate)
 }
@@ -80,10 +113,15 @@ func (p *Plugin) AddCommands() {
 				}
 			}
 
-			zone := parsed.Args[0].Str()
+			zoneInput := strings.TrimSpace(parsed.Args[0].Str())
+			if zoneInput == "" {
+				return "Please provide a timezone, e.g. `America/New_York` or `UTC`", nil
+			}
+
+			zone := normalizeTimezoneInput(zoneInput)
 			loc, err := time.LoadLocation(zone)
 			if err != nil {
-				return fmt.Sprintf("Unknown timezone `%s`", zone), nil
+				return fmt.Sprintf("Unknown timezone `%s`", zoneInput), nil
 			}
 
 			name, _ := time.Now().In(loc).Zone()
@@ -96,6 +134,10 @@ func (p *Plugin) AddCommands() {
 			err = m.UpsertG(parsed.Context(), true, []string{"user_id"}, boil.Infer(), boil.Infer())
 			if err != nil {
 				return nil, err
+			}
+
+			if !strings.EqualFold(zoneInput, zone) {
+				return fmt.Sprintf("Set your timezone to `%s` (from `%s`): %s\n", zone, zoneInput, name), nil
 			}
 
 			return fmt.Sprintf("Set your timezone to `%s`: %s\n", zone, name), nil
@@ -199,6 +241,19 @@ func GetUserTimezone(userID int64) *time.Location {
 	}
 
 	return loc
+}
+
+func normalizeTimezoneInput(zone string) string {
+	zone = strings.TrimSpace(zone)
+	if zone == "" {
+		return zone
+	}
+
+	if expanded, ok := timezoneAbbreviationMap[strings.ToUpper(zone)]; ok {
+		return expanded
+	}
+
+	return zone
 }
 
 func (p *Plugin) handleMessageCreate(evt *eventsystem.EventData) {
