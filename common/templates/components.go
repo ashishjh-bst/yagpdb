@@ -1162,3 +1162,258 @@ func validateTopLevelComponentsCustomIDs(rows []discordgo.TopLevelComponent, use
 	}
 	return nil
 }
+
+func componentBuilderFromMessage(msg *discordgo.Message) (*ComponentBuilder, error) {
+	if msg == nil {
+		return nil, errors.New("nil message passed to componentBuilder")
+	}
+
+	cb := &ComponentBuilder{}
+	if err := decomposeTopLevelComponents(cb, msg.Components); err != nil {
+		return nil, err
+	}
+	return cb, nil
+}
+
+func decomposeTopLevelComponents(cb *ComponentBuilder, components []discordgo.TopLevelComponent) error {
+	for _, c := range components {
+		if err := decomposeTopLevelComponent(cb, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func decomposeTopLevelComponent(cb *ComponentBuilder, c discordgo.TopLevelComponent) error {
+	var err error
+	switch v := c.(type) {
+	case *discordgo.ActionsRow:
+		return decomposeActionsRow(cb, v)
+	case *discordgo.TextDisplay:
+		_, err = cb.Add("text", v.Content)
+	case *discordgo.Section:
+		var sd SDict
+		if sd, err = sectionToSDict(v); err == nil {
+			_, err = cb.Add("section", sd)
+		}
+	case *discordgo.MediaGallery:
+		_, err = cb.Add("gallery", galleryToSlice(v))
+	case *discordgo.Separator:
+		_, err = cb.Add("separator", v.Spacing == discordgo.SeparatorSpacingLarge)
+	case *discordgo.Container:
+		var sd SDict
+		if sd, err = containerToSDict(v); err == nil {
+			_, err = cb.Add("container", sd)
+		}
+	default:
+		return errors.Errorf("componentBuilderFromMessage: unsupported component type %d", c.Type())
+	}
+	return err
+}
+
+func decomposeActionsRow(cb *ComponentBuilder, row *discordgo.ActionsRow) error {
+	buttons := Slice{}
+	for _, ic := range row.Components {
+		switch comp := ic.(type) {
+		case *discordgo.Button:
+			buttons = append(buttons, buttonToSDict(comp))
+		case *discordgo.SelectMenu:
+			if _, err := cb.Add("menus", menuToSDict(comp)); err != nil {
+				return err
+			}
+		default:
+			return errors.Errorf("componentBuilderFromMessage: unsupported interactive component type %d", ic.Type())
+		}
+	}
+	if len(buttons) > 0 {
+		if _, err := cb.Add("buttons", buttons); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func buttonToSDict(b *discordgo.Button) SDict {
+	sd := SDict{
+		"label":    b.Label,
+		"style":    buttonStyleName(b.Style),
+		"disabled": b.Disabled,
+	}
+	if b.Emoji != nil {
+		sd["emoji"] = emojiToSDict(b.Emoji)
+	}
+	if b.Style == discordgo.LinkButton {
+		sd["url"] = b.URL
+	} else if b.CustomID != "" {
+		sd["custom_id"] = strings.TrimPrefix(b.CustomID, TemplateCustomIDPrefix)
+	}
+	return sd
+}
+
+func buttonStyleName(style discordgo.ButtonStyle) string {
+	switch style {
+	case discordgo.SecondaryButton:
+		return "secondary"
+	case discordgo.SuccessButton:
+		return "success"
+	case discordgo.DangerButton:
+		return "danger"
+	case discordgo.LinkButton:
+		return "link"
+	default:
+		return "primary"
+	}
+}
+
+func menuToSDict(m *discordgo.SelectMenu) SDict {
+	sd := SDict{
+		"type":        menuTypeName(m.MenuType),
+		"placeholder": m.Placeholder,
+		"disabled":    m.Disabled,
+	}
+	if m.CustomID != "" {
+		sd["custom_id"] = strings.TrimPrefix(m.CustomID, TemplateCustomIDPrefix)
+	}
+	if m.MinValues != nil {
+		sd["min_values"] = *m.MinValues
+	}
+	if m.MaxValues != 0 {
+		sd["max_values"] = m.MaxValues
+	}
+	if len(m.Options) > 0 {
+		opts := Slice{}
+		for _, o := range m.Options {
+			opts = append(opts, menuOptionToSDict(o))
+		}
+		sd["options"] = opts
+	}
+	if len(m.DefaultValues) > 0 {
+		defaults := Slice{}
+		for _, d := range m.DefaultValues {
+			defaults = append(defaults, SDict{"id": d.ID, "type": string(d.Type)})
+		}
+		sd["default_values"] = defaults
+	}
+	if len(m.ChannelTypes) > 0 {
+		types := Slice{}
+		for _, t := range m.ChannelTypes {
+			types = append(types, int(t))
+		}
+		sd["channel_types"] = types
+	}
+	return sd
+}
+
+func menuTypeName(t discordgo.SelectMenuType) string {
+	switch t {
+	case discordgo.UserSelectMenu:
+		return "user"
+	case discordgo.RoleSelectMenu:
+		return "role"
+	case discordgo.MentionableSelectMenu:
+		return "mentionable"
+	case discordgo.ChannelSelectMenu:
+		return "channel"
+	default:
+		return "string"
+	}
+}
+
+func menuOptionToSDict(o discordgo.SelectMenuOption) SDict {
+	sd := SDict{
+		"label":       o.Label,
+		"value":       o.Value,
+		"description": o.Description,
+		"default":     o.Default,
+	}
+	if o.Emoji != nil {
+		sd["emoji"] = emojiToSDict(o.Emoji)
+	}
+	return sd
+}
+
+func emojiToSDict(e *discordgo.ComponentEmoji) SDict {
+	sd := SDict{}
+	if e.Name != "" {
+		sd["name"] = e.Name
+	}
+	if e.ID != 0 {
+		sd["id"] = strconv.FormatInt(e.ID, 10)
+	}
+	if e.Animated {
+		sd["animated"] = true
+	}
+	return sd
+}
+
+func sectionToSDict(s *discordgo.Section) (SDict, error) {
+	sd := SDict{}
+
+	texts := Slice{}
+	for _, part := range s.Components {
+		td, ok := part.(*discordgo.TextDisplay)
+		if !ok {
+			return nil, errors.Errorf("componentBuilderFromMessage: unsupported section component type %d", part.Type())
+		}
+		texts = append(texts, td.Content)
+	}
+	if len(texts) == 1 {
+		sd["text"] = texts[0]
+	} else if len(texts) > 1 {
+		sd["text"] = texts
+	}
+
+	switch acc := s.Accessory.(type) {
+	case nil:
+	case *discordgo.Button:
+		sd["button"] = buttonToSDict(acc)
+	case *discordgo.Thumbnail:
+		sd["thumbnail"] = thumbnailToSDict(acc)
+	default:
+		return nil, errors.Errorf("componentBuilderFromMessage: unsupported section accessory type %d", s.Accessory.Type())
+	}
+
+	return sd, nil
+}
+
+func thumbnailToSDict(t *discordgo.Thumbnail) SDict {
+	sd := SDict{"media": t.Media.URL}
+	if t.Description != "" {
+		sd["description"] = t.Description
+	}
+	if t.Spoiler {
+		sd["spoiler"] = true
+	}
+	return sd
+}
+
+func galleryToSlice(g *discordgo.MediaGallery) Slice {
+	items := Slice{}
+	for _, it := range g.Items {
+		sd := SDict{"media": it.Media.URL}
+		if it.Description != "" {
+			sd["description"] = it.Description
+		}
+		if it.Spoiler {
+			sd["spoiler"] = true
+		}
+		items = append(items, sd)
+	}
+	return items
+}
+
+func containerToSDict(c *discordgo.Container) (SDict, error) {
+	child := &ComponentBuilder{}
+	if err := decomposeTopLevelComponents(child, c.Components); err != nil {
+		return nil, err
+	}
+
+	sd := SDict{"components": child}
+	if c.AccentColor != 0 {
+		sd["color"] = c.AccentColor
+	}
+	if c.Spoiler {
+		sd["spoiler"] = true
+	}
+	return sd, nil
+}

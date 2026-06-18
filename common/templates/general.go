@@ -129,6 +129,10 @@ func CreateComponentBuilder(values ...interface{}) (compBuilder *ComponentBuilde
 			return typed, nil
 		case ComponentBuilder:
 			return &typed, nil
+		case discordgo.Message:
+			return componentBuilderFromMessage(&typed)
+		case *discordgo.Message:
+			return componentBuilderFromMessage(typed)
 		}
 
 		switch val.Kind() {
