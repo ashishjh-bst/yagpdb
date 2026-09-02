@@ -76,6 +76,13 @@ type Orchestrator struct {
 	// and you can still go over it if you manually start shards on a node
 	MaxShardsPerNode int
 
+	// how long a node is allowed to stay disconnected before it's removed from the orchestrator entirely,
+	// at which point it disappears from the status output and can no longer be targeted by any command.
+	// nodes send their running shards along when they re-identify, so there's nothing in the entry worth
+	// keeping around once they're gone.
+	// if 0, DefaultNodeReapDelay is used, if below 0 disconnected nodes are never removed (the old behaviour)
+	NodeReapDelay time.Duration
+
 	// in case we are intiailizing max shards from nodes, we wait 10 seconds when we start before we decide we need to fetch a fresh shard count
 	SkipSafeStartupDelayMaxShards bool
 
@@ -178,6 +185,99 @@ func (o *Orchestrator) FindNodeByID(id string) *NodeConn {
 	o.mu.Unlock()
 
 	return nil
+}
+
+// DefaultNodeReapDelay is how long a disconnected node is kept around when Orchestrator.NodeReapDelay is unset
+const DefaultNodeReapDelay = time.Second * 30
+
+// snapshotNodes returns a copy of the currently tracked nodes
+func (o *Orchestrator) snapshotNodes() []*NodeConn {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	nodes := make([]*NodeConn, len(o.connectedNodes))
+	copy(nodes, o.connectedNodes)
+	return nodes
+}
+
+// removeNodeConnLocked stops tracking the provided node, it assumes o.mu is held
+func (o *Orchestrator) removeNodeConnLocked(nc *NodeConn) bool {
+	for i, v := range o.connectedNodes {
+		if v == nc {
+			o.connectedNodes = append(o.connectedNodes[:i], o.connectedNodes[i+1:]...)
+			return true
+		}
+	}
+
+	return false
+}
+
+// RemoveNode removes the node from the orchestrator entirely, it will no longer show up in the status
+// output and can no longer be targeted by any command. it does not stop the node, only stops tracking it.
+func (o *Orchestrator) RemoveNode(nc *NodeConn) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.removeNodeConnLocked(nc)
+}
+
+// ReapDisconnectedNodes removes the nodes that have been disconnected for longer than the reap delay.
+// without this, dead nodes linger in the status output forever holding a stale shard list, and commands
+// such as ShutdownNode still happily target them
+func (o *Orchestrator) ReapDisconnectedNodes() {
+	delay := o.NodeReapDelay
+	if delay == 0 {
+		delay = DefaultNodeReapDelay
+	} else if delay < 0 {
+		// reaping is disabled
+		return
+	}
+
+	for _, n := range o.snapshotNodes() {
+		n.mu.Lock()
+		shouldReap := !n.connected && time.Since(n.disconnectedAt) > delay
+		lastKnownShards := len(n.runningShards)
+		n.mu.Unlock()
+
+		if !shouldReap {
+			continue
+		}
+
+		if o.RemoveNode(n) {
+			o.Log(dshardorchestrator.LogInfo, nil, fmt.Sprintf("removed node %q, it has been disconnected for over %s (it was last holding %d shards)", n.Conn.GetID(), delay, lastKnownShards))
+		}
+	}
+}
+
+// abortShardMigrationsWith clears the migration state on every node that was migrating a shard to or
+// from the provided node, called when a node disconnects since the migration can never complete then
+func (o *Orchestrator) abortShardMigrationsWith(nodeID string) {
+	for _, n := range o.snapshotNodes() {
+		n.mu.Lock()
+		if n.shardMigrationMode == dshardorchestrator.ShardMigrationModeNone || n.shardMigrationOtherNodeID != nodeID {
+			n.mu.Unlock()
+			continue
+		}
+
+		shard := n.shardMigrationShard
+		n.clearShardMigrationState()
+		n.mu.Unlock()
+
+		o.Log(dshardorchestrator.LogWarning, nil, fmt.Sprintf("aborted the migration of shard %d on node %q, the other end (%q) disconnected", shard, n.Conn.GetID(), nodeID))
+	}
+}
+
+// IsResponsibleForShard returns whether this orchestrator is responsible for running the provided shard
+func (o *Orchestrator) IsResponsibleForShard(shard int) bool {
+	return o.isResponsibleForShard(shard)
+}
+
+// TotalShards returns the total shard count the orchestrator is currently working with, 0 if not known yet
+func (o *Orchestrator) TotalShards() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.totalShards
 }
 
 type NodeStatus struct {
@@ -343,6 +443,7 @@ func (o *Orchestrator) StartNewNode() (string, error) {
 var (
 	ErrShardAlreadyRunning = errors.New("shard already running")
 	ErrUnknownNode         = errors.New("unknown node")
+	ErrNodeNotConnected    = errors.New("node was not connected, removed it from the orchestrator instead")
 )
 
 // StartShard will start the specified shard on the specified node
@@ -418,16 +519,22 @@ func (o *Orchestrator) MigrateFullNode(fromNode string, toNodeID string, shutdow
 		}
 
 		// wait for it to be moved before we start the next one
-		o.WaitForShardMigration(nodeFrom, toNode, s)
+		completed := o.WaitForShardMigration(nodeFrom, toNode, s)
 
 		// reset here in case something went wrong
 		toNode.mu.Lock()
-		toNode.shardMigrationMode = dshardorchestrator.ShardMigrationModeNone
+		toNode.clearShardMigrationState()
 		toNode.mu.Unlock()
 
 		nodeFrom.mu.Lock()
-		nodeFrom.shardMigrationMode = dshardorchestrator.ShardMigrationModeNone
+		nodeFrom.clearShardMigrationState()
 		nodeFrom.mu.Unlock()
+
+		if !completed {
+			// the shard is stopped on the origin and never made it to the destination, the monitor
+			// will start it again now that neither node is stuck in a migrating state
+			return errors.Errorf("migration of shard %d from %s to %s did not complete, aborting the rest of the node migration", s, fromNode, toNodeID)
+		}
 
 		// wait a bit extra to allow for some time ot catch up on events processing
 		time.Sleep(time.Second)
@@ -447,21 +554,56 @@ func (o *Orchestrator) ShutdownNode(nodeID string) error {
 		return ErrUnknownNode
 	}
 
+	if !node.IsConnected() {
+		// there's no process on the other end to shut down, sending into the dead connection would
+		// silently do nothing and leave the entry sitting in the status output, so just drop it
+		o.RemoveNode(node)
+		o.Log(dshardorchestrator.LogInfo, nil, fmt.Sprintf("asked to shut down %q but it was already disconnected, removed it from the orchestrator", nodeID))
+		return ErrNodeNotConnected
+	}
+
+	o.Log(dshardorchestrator.LogInfo, nil, fmt.Sprintf("shutting down node %q", nodeID))
 	node.Shutdown()
 	return nil
 }
 
-// WaitForShardMigration blocks until a shard migration is complete
-func (o *Orchestrator) WaitForShardMigration(fromNode *NodeConn, toNode *NodeConn, shardID int) {
+// ShardMigrationTimeout is the longest a single shard migration is allowed to take before it's
+// considered failed
+var ShardMigrationTimeout = time.Minute * 5
+
+// WaitForShardMigration blocks until a shard migration is complete, it returns false if the migration
+// did not complete, either because one of the two nodes disconnected or because it timed out.
+//
+// note that every wait below has to give up when *either* node disconnects: this used to only look at
+// the origin node, so a destination node dying mid migration left this spinning forever, hanging the
+// full node migration it was called from for the lifetime of the process
+func (o *Orchestrator) WaitForShardMigration(fromNode *NodeConn, toNode *NodeConn, shardID int) bool {
+	deadline := time.Now().Add(ShardMigrationTimeout)
+
+	timedOut := func(step string) bool {
+		if time.Now().Before(deadline) {
+			return false
+		}
+
+		o.Log(dshardorchestrator.LogError, nil, fmt.Sprintf("timed out after %s %s during the migration of shard %d from %q to %q", ShardMigrationTimeout, step, shardID, fromNode.Conn.GetID(), toNode.Conn.GetID()))
+		return true
+	}
+
 	// wait for the shard to dissapear on the origin node
 	for {
 		time.Sleep(time.Second)
 
 		status := fromNode.GetFullStatus()
-
-		if !dshardorchestrator.ContainsInt(status.Shards, shardID) || !status.Connected {
-			// also if we disconnected then just go through all this immeditely
+		if !dshardorchestrator.ContainsInt(status.Shards, shardID) {
 			break
+		}
+
+		if !status.Connected || !toNode.IsConnected() {
+			return false
+		}
+
+		if timedOut("waiting for the shard to stop on the origin node") {
+			return false
 		}
 	}
 
@@ -470,11 +612,16 @@ func (o *Orchestrator) WaitForShardMigration(fromNode *NodeConn, toNode *NodeCon
 		time.Sleep(time.Millisecond * 100)
 
 		statusTo := toNode.GetFullStatus()
-		statusFrom := fromNode.GetFullStatus()
-
-		if dshardorchestrator.ContainsInt(statusTo.Shards, shardID) || !statusFrom.Connected {
-			// also if we disconnected then just go through all this immeditely
+		if dshardorchestrator.ContainsInt(statusTo.Shards, shardID) {
 			break
+		}
+
+		if !statusTo.Connected || !fromNode.IsConnected() {
+			return false
+		}
+
+		if timedOut("waiting for the shard to appear on the destination node") {
+			return false
 		}
 	}
 
@@ -483,12 +630,20 @@ func (o *Orchestrator) WaitForShardMigration(fromNode *NodeConn, toNode *NodeCon
 		time.Sleep(time.Millisecond * 100)
 
 		statusTo := toNode.GetFullStatus()
-		statusFrom := fromNode.GetFullStatus()
-
-		if statusTo.MigratingFrom == "" || !statusFrom.Connected {
+		if statusTo.MigratingFrom == "" {
 			break
 		}
+
+		if !statusTo.Connected || !fromNode.IsConnected() {
+			return false
+		}
+
+		if timedOut("waiting for the destination node to leave the migrating state") {
+			return false
+		}
 	}
+
+	return true
 }
 
 func (o *Orchestrator) findAvailableNode(ignore []*NodeStatus) (string, error) {

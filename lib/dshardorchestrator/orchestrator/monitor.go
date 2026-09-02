@@ -68,6 +68,9 @@ func (mon *monitor) ensureTotalShards() int {
 }
 
 func (mon *monitor) tick() {
+	// this runs regardless of EnsureAllShardsRunning, dead nodes should never pile up
+	mon.orchestrator.ReapDisconnectedNodes()
+
 	if !mon.orchestrator.EnsureAllShardsRunning {
 		// currently this is the only purpose of the monitor, it may be extended to perform more as it could be a reliable way of handling a bunch of things
 		return
@@ -115,8 +118,14 @@ OUTER:
 			continue
 		}
 
-		// check if this shard is in a shard migration, in which case ignore it
+		// check if this shard is in a shard migration, in which case ignore it.
+		// only a connected node can actually be migrating anything, the migration state of a
+		// disconnected one is stale and would otherwise keep the shard down forever
 		for _, ns := range fullNodeStatuses {
+			if !ns.Connected {
+				continue
+			}
+
 			if ns.MigratingShard == i && (ns.MigratingFrom != "" || ns.MigratingTo != "") {
 				continue OUTER
 			}

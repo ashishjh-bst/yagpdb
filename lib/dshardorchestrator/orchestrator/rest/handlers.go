@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/botlabs-gg/yagpdb/v2/lib/dshardorchestrator/orchestrator"
 	"github.com/gin-gonic/gin"
@@ -55,6 +56,12 @@ func (ra *RESTAPI) handlePOSTShutdownNode(c *gin.Context) {
 	fmt.Println("REST: should shut down " + node)
 
 	err := ra.orchestrator.ShutdownNode(node)
+	if errors.Cause(err) == orchestrator.ErrNodeNotConnected {
+		// not an error worth shouting about, the node was already gone and we cleaned up the entry
+		sendBasicResponse(c, nil, "node was already disconnected, removed it from the orchestrator")
+		return
+	}
+
 	sendBasicResponse(c, err, "stopped node successfully")
 }
 
@@ -110,6 +117,49 @@ func (ra *RESTAPI) handlePOSTStopShard(c *gin.Context) {
 
 	err = ra.orchestrator.StopShard(parsedShardID)
 	sendBasicResponse(c, err, "sent stop shard action")
+}
+
+func (ra *RESTAPI) handlePOSTStartShard(c *gin.Context) {
+	nodeID, _ := c.GetPostForm("node")
+	shardsStr, _ := c.GetPostForm("shards")
+
+	force := false
+	if s, ok := c.GetPostForm("force"); ok && s == "true" {
+		force = true
+	}
+
+	if nodeID == "" || shardsStr == "" {
+		sendBasicResponse(c, errors.New("node or shards not provided"), "")
+		return
+	}
+
+	shards := make([]int, 0)
+	for _, v := range strings.Split(shardsStr, ",") {
+		parsedShardID, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			sendBasicResponse(c, errors.WithMessage(err, "parse-shardid"), "")
+			return
+		}
+
+		if !force {
+			// starting a shard this host isn't responsible for would run it twice across the fleet,
+			// so it takes an explicit force
+			if totalShards := ra.orchestrator.TotalShards(); totalShards > 0 && (parsedShardID < 0 || parsedShardID >= totalShards) {
+				sendBasicResponse(c, errors.Errorf("shard %d is out of range, total shards: %d", parsedShardID, totalShards), "")
+				return
+			}
+
+			if !ra.orchestrator.IsResponsibleForShard(parsedShardID) {
+				sendBasicResponse(c, errors.Errorf("this orchestrator is not responsible for shard %d, pass force=true to start it anyways", parsedShardID), "")
+				return
+			}
+		}
+
+		shards = append(shards, parsedShardID)
+	}
+
+	err := ra.orchestrator.StartShards(nodeID, shards...)
+	sendBasicResponse(c, err, fmt.Sprintf("sent start shards action for %v", shards))
 }
 
 func (ra *RESTAPI) handlePOSTBlacklistNode(c *gin.Context) {

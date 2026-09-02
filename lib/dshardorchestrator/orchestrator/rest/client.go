@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 type Client struct {
@@ -142,6 +143,32 @@ func (c *Client) StopShard(shard int) (msg string, err error) {
 
 	var resp BasicResponse
 	err = c.do("POST", "/stopshard", []byte(body), &resp)
+	if err != nil {
+		return "", err
+	}
+
+	return c.handleBasicResponse(&resp)
+}
+
+// StartShards starts the provided shards on the provided node, force skips the checks that the shards
+// are within range and that this orchestrator is the one responsible for them
+func (c *Client) StartShards(nodeID string, force bool, shards ...int) (msg string, err error) {
+	strShards := make([]string, len(shards))
+	for i, v := range shards {
+		strShards[i] = strconv.Itoa(v)
+	}
+
+	bodyVals := url.Values{
+		"node":   []string{nodeID},
+		"shards": []string{strings.Join(strShards, ",")},
+	}
+
+	if force {
+		bodyVals["force"] = []string{"true"}
+	}
+
+	var resp BasicResponse
+	err = c.do("POST", "/startshard", []byte(bodyVals.Encode()), &resp)
 	if err != nil {
 		return "", err
 	}

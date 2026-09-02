@@ -36,18 +36,33 @@ type NodeConn struct {
 // NewNodeConn creates a new NodeConn (connection from master to slave) from a net.Conn
 func (o *Orchestrator) NewNodeConn(netConn net.Conn) *NodeConn {
 	sc := &NodeConn{
-		Conn:         dshardorchestrator.ConnFromNetCon(netConn, o.Logger),
-		Orchestrator: o,
-		connected:    true,
+		Conn:                dshardorchestrator.ConnFromNetCon(netConn, o.Logger),
+		Orchestrator:        o,
+		connected:           true,
+		shardMigrationShard: -1,
 	}
 
 	sc.Conn.MessageHandler = sc.handleMessage
 	sc.Conn.ConnClosedHanlder = func() {
-		// TODO
 		sc.mu.Lock()
 		sc.connected = false
 		sc.disconnectedAt = time.Now()
+
+		// a node that's gone can never finish a shard migration, so drop the migration state here.
+		// if we didn't, this node and the one on the other end of the migration would both be stuck
+		// in a migrating state forever, which blocks the monitor from restarting the shard and makes
+		// every later migration involving them fail with ErrNodeBusy
+		migratingShard := sc.shardMigrationShard
+		wasMigrating := sc.shardMigrationMode != dshardorchestrator.ShardMigrationModeNone
+		sc.clearShardMigrationState()
 		sc.mu.Unlock()
+
+		if wasMigrating {
+			o.Log(dshardorchestrator.LogWarning, nil, fmt.Sprintf("node %q disconnected while migrating shard %d, aborting that migration", sc.Conn.GetID(), migratingShard))
+		}
+
+		// the node on the other end of any migration involving this one is stuck as well, clear it too
+		o.abortShardMigrationsWith(sc.Conn.GetID())
 	}
 
 	return sc
@@ -229,10 +244,10 @@ func (nc *NodeConn) handleIdentify(data *dshardorchestrator.IdentifyData) {
 
 	// check if were holding a duplicates
 	nc.Orchestrator.mu.Lock()
-	for i, n := range nc.Orchestrator.connectedNodes {
+	for _, n := range nc.Orchestrator.connectedNodes {
 		if n.Conn.GetID() == data.NodeID && n != nc {
 			go n.Conn.Close()
-			nc.Orchestrator.connectedNodes = append(nc.Orchestrator.connectedNodes[:i], nc.Orchestrator.connectedNodes[i+1:]...)
+			nc.Orchestrator.removeNodeConnLocked(n)
 			break
 		}
 	}
@@ -279,6 +294,24 @@ func (nc *NodeConn) GetFullStatus() *NodeStatus {
 	}
 
 	return status
+}
+
+// IsConnected returns whether the node is currently connected to the orchestrator
+func (nc *NodeConn) IsConnected() bool {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	return nc.connected
+}
+
+// clearShardMigrationState resets any in progress shard migration on this node
+// assumes nc.mu is held
+func (nc *NodeConn) clearShardMigrationState() {
+	nc.shardMigrationMode = dshardorchestrator.ShardMigrationModeNone
+	nc.shardMigrationOtherNodeID = ""
+	nc.shardMigrationShard = -1
+	nc.processedUserEvents = 0
+	nc.shardmigrationTotalUserEvts = 0
 }
 
 // StartShards tells the node to start the following shards
