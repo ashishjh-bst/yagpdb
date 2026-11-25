@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -143,6 +144,13 @@ func (tm *triviaSessionManager) handleInteractionCreate(evt *eventsystem.EventDa
 }
 
 func (t *triviaSession) tickLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.WithField("guild", t.GuildID).Warnf("trivia session panicked: %v\n%s", r, debug.Stack())
+			t.Manager.removeSession(t)
+		}
+	}()
+
 	for {
 		ended := t.tick()
 		if ended || time.Since(t.createdAt) > 1*time.Minute {
@@ -374,6 +382,15 @@ func (t *triviaSession) handleInteractionAdd(evt *eventsystem.EventData) {
 			optionIndex = i
 			break
 		}
+	}
+
+	if optionIndex == -1 {
+		response.Data.Content = "That isn't one of the answers for this trivia."
+		err = evt.Session.CreateInteractionResponse(ic.ID, ic.Token, &response)
+		if err != nil {
+			logger.WithError(err).Error("Failed creating interaction response")
+		}
+		return
 	}
 
 	t.SelectedOptions = append(t.SelectedOptions, &pickedOption{
