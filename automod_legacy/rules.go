@@ -18,6 +18,7 @@ import (
 	"github.com/botlabs-gg/yagpdb/v2/moderation"
 	"github.com/botlabs-gg/yagpdb/v2/safebrowsing"
 	"github.com/botlabs-gg/yagpdb/v2/serverpreview"
+	gsafebrowsing "github.com/google/safebrowsing"
 	"github.com/mediocregopher/radix/v3"
 )
 
@@ -547,45 +548,66 @@ func (s *SitesRule) Check(evt *discordgo.Message, cs *dstate.ChannelState) (del 
 }
 
 func (s *SitesRule) checkMessage(message *discordgo.Message) (banned bool, item string, threatList string) {
+	// safebrowsing is batched over the contents before the first banned or scam link,
+	// so the reported item matches checking each content in order
+	var checked []string
 	for _, content := range messageTexts(message, s.IncludeExtraText) {
-		content = confusables.NormalizeQueryEncodedText(content)
-		matches := common.LinkRegex.FindAllString(common.ForwardSlashReplacer.Replace(content), -1)
-		for _, v := range matches {
-			if !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") && !strings.HasPrefix(v, "steam://") {
-				v = "http://" + v
-			}
-
-			parsed, err := url.ParseRequestURI(v)
-			if err != nil {
-				logger.WithError(err).WithField("url", v).Error("Failed parsing request url matched with regex")
-			} else {
-				if banned, item := s.isBanned(parsed.Host); banned {
-					return true, item, ""
-				}
-			}
-		}
-
-		if s.ScamLinkProtection {
-			scamLink, err := antiphishing.CheckMessageForPhishingDomains(common.ForwardSlashReplacer.Replace(content))
-			if err != nil {
-				logger.WithError(err).Error("Failed checking urls against antiphishing APIs")
-			} else if scamLink != "" {
-				return true, scamLink, ""
-			}
-		}
-
-		// Check safebrowsing
-		if s.GoogleSafeBrowsingEnabled {
-			threat, err := safebrowsing.CheckString(common.ForwardSlashReplacer.Replace(content))
-			if err != nil {
-				logger.WithError(err).Error("Failed checking urls against google safebrowser")
-			} else if threat != nil {
+		content = common.ForwardSlashReplacer.Replace(confusables.NormalizeQueryEncodedText(content))
+		if item := s.findBannedLink(content); item != "" {
+			if threat := s.checkSafeBrowsing(checked); threat != nil {
 				return true, threat.Pattern, threat.ThreatType.String()
+			}
+			return true, item, ""
+		}
+		checked = append(checked, content)
+	}
+
+	if threat := s.checkSafeBrowsing(checked); threat != nil {
+		return true, threat.Pattern, threat.ThreatType.String()
+	}
+
+	return false, "", ""
+}
+
+func (s *SitesRule) findBannedLink(content string) string {
+	matches := common.LinkRegex.FindAllString(content, -1)
+	for _, v := range matches {
+		if !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") && !strings.HasPrefix(v, "steam://") {
+			v = "http://" + v
+		}
+
+		parsed, err := url.ParseRequestURI(v)
+		if err != nil {
+			logger.WithError(err).WithField("url", v).Error("Failed parsing request url matched with regex")
+		} else {
+			if banned, item := s.isBanned(parsed.Host); banned {
+				return item
 			}
 		}
 	}
 
-	return false, "", ""
+	if s.ScamLinkProtection {
+		scamLink, err := antiphishing.CheckMessageForPhishingDomains(content)
+		if err != nil {
+			logger.WithError(err).Error("Failed checking urls against antiphishing APIs")
+		} else if scamLink != "" {
+			return scamLink
+		}
+	}
+
+	return ""
+}
+
+func (s *SitesRule) checkSafeBrowsing(contents []string) *gsafebrowsing.URLThreat {
+	if !s.GoogleSafeBrowsingEnabled || len(contents) == 0 {
+		return nil
+	}
+
+	threat, err := safebrowsing.CheckStrings(contents)
+	if err != nil {
+		logger.WithError(err).Error("Failed checking urls against google safebrowser")
+	}
+	return threat
 }
 
 func (s *SitesRule) isBanned(host string) (bool, string) {
