@@ -531,6 +531,14 @@ func (cc *CustomCommand) Validate(tmpl web.TemplateData, guild_id int64) (ok boo
 		}
 	}
 
+	switch triggerTypeFromForm(cc.TriggerTypeForm) {
+	case CommandTriggerRegex, CommandTriggerComponent, CommandTriggerModal:
+		if err := common.CheckUserRegex(cc.Trigger, common.MaxTriggerRegexProgramSize); err != nil {
+			tmpl.AddAlerts(web.ErrorAlert("Invalid trigger regex: " + err.Error()))
+			return false
+		}
+	}
+
 	return true
 
 }

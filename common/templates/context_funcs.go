@@ -1897,7 +1897,7 @@ func (c *Context) compileRegex(r string) (*regexp.Regexp, error) {
 		return nil, ErrRegexCacheLimit
 	}
 
-	compiled, err := regexp.Compile(r)
+	compiled, err := common.CompileUserRegex(r, common.MaxTemplateRegexProgramSize)
 	if err != nil {
 		return nil, err
 	}
