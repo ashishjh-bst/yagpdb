@@ -264,6 +264,9 @@ type Context struct {
 	// RunningCCs are the custom commands already executing in this synchronous execCC chain, whose locks are held.
 	RunningCCs []int64
 
+	// execUsage is shared by nested template executions so they draw from the parent's budget.
+	execUsage *template.Usage
+
 	contextFuncsAdded bool
 }
 
@@ -561,8 +564,14 @@ func (c *Context) executeParsed() (string, error) {
 		}
 	}()
 
-	allocated, err := parsed.ExecuteCountingAlloc(w, c.Data)
-	if allocated > LogAllocAbove {
+	nested := c.execUsage != nil
+	if !nested {
+		c.execUsage = &template.Usage{}
+		defer func() { c.execUsage = nil }()
+	}
+
+	err = parsed.ExecuteWithUsage(w, c.Data, c.execUsage)
+	if allocated := c.execUsage.AllocatedBytes; !nested && allocated > LogAllocAbove {
 		logger.WithFields(logrus.Fields{
 			"guild_id":      c.GS.ID,
 			"executed_from": c.ExecutedFrom,
@@ -752,11 +761,11 @@ func (c *Context) SendResponse(content string) (m *discordgo.Message, err error)
 		}
 		if !c.CurrentFrame.EphemeralResponse {
 			if len(c.CurrentFrame.AddResponseReactionNames) > 0 {
-				go func(frame *ContextFrame) {
-					for _, v := range frame.AddResponseReactionNames {
+				go func(names []string) {
+					for _, v := range names {
 						common.BotSession.MessageReactionAdd(m.ChannelID, m.ID, v)
 					}
-				}(c.CurrentFrame)
+				}(slices.Clone(c.CurrentFrame.AddResponseReactionNames))
 			}
 
 			if c.CurrentFrame.PublishResponse && c.CurrentFrame.CS.Type == discordgo.ChannelTypeGuildNews {
@@ -1118,12 +1127,18 @@ func (c *cyclicValueDetector) Check(v reflect.Value) error {
 	v, _ = indirect(v)
 	switch v.Kind() {
 	case reflect.Map:
-		if v.Len() == 0 || !canHoldContainer(v.Type().Elem()) {
+		checkKeys := canHoldContainer(v.Type().Key())
+		if v.Len() == 0 || !checkKeys && !canHoldContainer(v.Type().Elem()) {
 			return nil
 		}
 		return c.visit(v.Pointer(), v.Type().String(), func() error {
 			it := v.MapRange()
 			for it.Next() {
+				if checkKeys {
+					if err := c.Check(it.Key()); err != nil {
+						return err
+					}
+				}
 				if err := c.Check(it.Value()); err != nil {
 					return err
 				}
@@ -1184,7 +1199,7 @@ func (d Dict) Set(key any, value any) (string, error) {
 		return "", errors.New("key cannot be nil")
 	}
 	d[key] = value
-	if isContainer(value) {
+	if isContainer(key) || isContainer(value) {
 		if err := detectCyclicValue(d); err != nil {
 			return "", template.UncatchableError(err)
 		}

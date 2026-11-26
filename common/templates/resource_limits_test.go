@@ -68,6 +68,31 @@ func TestCycleCheckStillFindsCycles(t *testing.T) {
 	}
 }
 
+func TestCycleCheckFollowsMapKeys(t *testing.T) {
+	builder := &ComponentBuilder{}
+	d := Dict{}
+	if _, err := d.Set(builder, "v"); err != nil {
+		t.Fatalf("an acyclic builder key was reported as a cycle: %v", err)
+	}
+	if _, err := builder.Add("k", d); err == nil {
+		t.Fatal("expected a builder holding a dict keyed by itself to be rejected")
+	}
+
+	builder = &ComponentBuilder{}
+	d = Dict{}
+	if _, err := builder.Add("k", d); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := d.Set(builder, "v"); err == nil {
+		t.Fatal("expected keying a dict by a builder that holds it to be rejected")
+	}
+
+	shared := &ComponentBuilder{}
+	if _, err := (Dict{shared: 1, "a": shared}).Set("b", Slice{shared}); err != nil {
+		t.Fatalf("an aliased but acyclic key was reported as a cycle: %v", err)
+	}
+}
+
 func TestSendTemplateDataCheckIsLinear(t *testing.T) {
 	c := &Context{Data: map[string]any{"x": 1}}
 
@@ -104,6 +129,33 @@ func TestRangeErrorDoesNotFormatTheValue(t *testing.T) {
 	}
 	if took := time.Since(start); took > time.Second {
 		t.Fatalf("range error took %s", took)
+	}
+}
+
+func TestNestedExecutionSharesBudget(t *testing.T) {
+	run := func(n int) error {
+		c := &Context{Data: map[string]any{"S": make([]int, n)}, CurrentFrame: &ContextFrame{}}
+		nested := func() (string, error) {
+			parent := c.CurrentFrame.parsedTemplate
+			defer func() { c.CurrentFrame.parsedTemplate = parent }()
+			c.CurrentFrame.parsedTemplate = parent.Lookup("child")
+			return c.executeParsed()
+		}
+		tmpl, err := template.New("t").Funcs(map[string]any{"nested": nested}).
+			Parse(`{{define "child"}}{{range .S}}{{end}}{{end}}{{range .S}}{{end}}{{nested}}{{nested}}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.CurrentFrame.parsedTemplate = tmpl
+		_, err = c.executeParsed()
+		return err
+	}
+
+	if err := run(MaxOpsNormal / 6); err != nil {
+		t.Fatalf("nested executions within the budget failed: %v", err)
+	}
+	if err := run(MaxOpsNormal / 2); err == nil || !strings.Contains(err.Error(), "exceeded max operations") {
+		t.Fatalf("expected nested executions to share one op budget, got %v", err)
 	}
 }
 

@@ -358,6 +358,9 @@ func (c *Context) tmplSendMessage(filterSpecialMentions bool, returnID bool) fun
 		}
 
 		if cid != c.ChannelArgNoDM(channel) {
+			if c.IncreaseCheckCallCounter("send_dm", 1) {
+				return "", ErrTooManyCalls
+			}
 			sendType = sendMessageDM
 		}
 
