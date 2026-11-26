@@ -51,16 +51,19 @@ func publicOnlyDialControl(network, address string, _ syscall.RawConn) error {
 	return nil
 }
 
-// ExternalHTTPClient is for fetching user-supplied URLs. It refuses to connect to
-// non-public addresses, checked after DNS resolution on every connection including redirects.
+// PublicOnlyDialContext refuses to connect to non-public addresses, checked after DNS resolution
+// on every connection including redirects.
+var PublicOnlyDialContext = (&net.Dialer{
+	Timeout: 10 * time.Second,
+	Control: publicOnlyDialControl,
+}).DialContext
+
+// ExternalHTTPClient is for fetching user-supplied URLs, see PublicOnlyDialContext.
 var ExternalHTTPClient = &http.Client{
 	Timeout: 30 * time.Second,
 	Transport: &http.Transport{
-		Proxy: nil,
-		DialContext: (&net.Dialer{
-			Timeout: 10 * time.Second,
-			Control: publicOnlyDialControl,
-		}).DialContext,
+		Proxy:                 nil,
+		DialContext:           PublicOnlyDialContext,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,
 		MaxIdleConns:          10,
