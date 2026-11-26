@@ -14,7 +14,7 @@ func TestFetchUserRegex(t *testing.T) {
 		t.Fatal("expected a valid pattern to compile and match")
 	}
 
-	for _, p := range []string{`(unclosed`, `.{0,999}z`} {
+	for _, p := range []string{`(unclosed`, strings.Repeat(`.{0,999}`, 10)} {
 		if FetchUserRegex(cache, p, MaxTriggerRegexProgramSize) != nil {
 			t.Errorf("expected %q to be rejected", p)
 		}
@@ -40,7 +40,7 @@ func TestCachedUserRegexSize(t *testing.T) {
 	}
 
 	worst := compileCachedUserRegex(strings.Repeat("a", MaxTriggerRegexProgramSize-2), MaxTriggerRegexProgramSize)
-	if worst.re == nil || UserRegexCacheBudget/worst.Size() < 200 {
+	if worst.re == nil || UserRegexCacheBudget/worst.Size() < 40 {
 		t.Errorf("worst case pattern estimated at %d bytes, budget holds too few", worst.Size())
 	}
 }

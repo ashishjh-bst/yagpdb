@@ -13,14 +13,16 @@ import (
 // .{0,999} make a short pattern compile to a very large program, so user supplied regexes are capped by
 // program size rather than pattern length.
 const (
-	// Triggers run against every message, a 1000 character literal trigger compiles to about 1000.
-	MaxTriggerRegexProgramSize = 1500
+	// Triggers run against every message. Long message checks like (.|\n){700,} and stretched words like
+	// hi{2,1000} are common and the largest trigger in use compiles to about 8000, while stacked repeats such
+	// as .{0,999}.{0,999}... reach 20000 and more.
+	MaxTriggerRegexProgramSize = 10000
 	// Leaves room for chunking idioms such as .{1,1000}, which compiles to about 2000.
 	MaxTemplateRegexProgramSize = 10000
 )
 
 // UserRegexCacheBudget is the approximate number of bytes of compiled regexes a user regex cache holds.
-// A regex at MaxTriggerRegexProgramSize is estimated at about 100KB, so this is a few hundred worst case
+// A regex at MaxTriggerRegexProgramSize is estimated at about 640KB, so this is about 50 worst case
 // patterns or many thousands of typical ones.
 const UserRegexCacheBudget = 32 << 20
 
