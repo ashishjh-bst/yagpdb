@@ -235,7 +235,10 @@ func (i *InviteRule) Check(evt *discordgo.Message, cs *dstate.ChannelState) (del
 type GuildInvites struct {
 	createdAt time.Time
 	invites   map[string]bool
+	failed    bool
 }
+
+const failedInviteFetchRetry = 5 * time.Minute
 
 type cachedGuildInvites struct {
 	sync.RWMutex
@@ -275,10 +278,10 @@ func (c *cachedGuildInvites) get(guildId int64) (GuildInvites, bool) {
 	return guildInvite, ok
 }
 
-func (c *cachedGuildInvites) set(guildID int64, invites map[string]bool) {
+func (c *cachedGuildInvites) set(guildID int64, invites map[string]bool, failed bool) {
 	c.Lock()
 	defer c.Unlock()
-	c.guilds[guildID] = GuildInvites{time.Now(), invites}
+	c.guilds[guildID] = GuildInvites{time.Now(), invites, failed}
 }
 
 var invitesCache cachedGuildInvites
@@ -301,20 +304,17 @@ func CheckMessageForBadInvites(msg *discordgo.Message, includeExtraText bool) (c
 		}
 
 		guildInvites, ok := invitesCache.get(guildID)
+		if ok && guildInvites.failed && time.Since(guildInvites.createdAt) > failedInviteFetchRetry {
+			ok = false
+		}
 		if !ok { // we do not have a cache for this guild yet, create it
+			// failures and empty results are cached too, otherwise every invite-like message
+			// in a guild where the bot can't list invites makes another request to discord
 			invites, err := common.BotSession.GuildInvites(guildID)
 			if err != nil {
 				logger.WithError(err).WithField("guild", guildID).Error("Failed fetching invites", invites)
-				return true // assume bad since discord...
 			}
 
-			// if there are no invites for this guild
-			// assume it is a bad invite.
-			if len(invites) == 0 {
-				return true
-			}
-
-			// add invites to the cache
 			inviteMap := make(map[string]bool)
 			for _, invite := range invites {
 				inviteMap[invite.Code] = true
@@ -324,10 +324,13 @@ func CheckMessageForBadInvites(msg *discordgo.Message, includeExtraText bool) (c
 				inviteMap[guild.VanityURLCode] = true
 			}
 
-			invitesCache.set(guildID, inviteMap)
+			invitesCache.set(guildID, inviteMap, err != nil)
 
-			// overwrite the empty invite map
-			// with the one just returned by discord
+			// assume it is a bad invite if discord failed or the guild has no invites
+			if err != nil || len(invites) == 0 {
+				return true
+			}
+
 			guildInvites = GuildInvites{
 				invites: inviteMap,
 			}
