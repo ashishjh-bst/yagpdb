@@ -221,21 +221,7 @@ func ExecuteCustomCommandFromMessage(gs *dstate.GuildSet, cmd *models.CustomComm
 }
 
 func matchRegexSplitArgs(pattern, msg string) (match bool, stripped string, args []string) {
-	item, err := RegexCache.Fetch(pattern, time.Minute*10, func() (any, error) {
-		re, err := common.CompileUserRegex(pattern, common.MaxTriggerRegexProgramSize)
-		if err != nil {
-			// cached as nil so a bad pattern isn't compiled again for every message
-			return (*regexp.Regexp)(nil), nil
-		}
-
-		return re, nil
-	})
-
-	if err != nil {
-		return false, "", nil
-	}
-
-	re := item.Value().(*regexp.Regexp)
+	re := common.FetchUserRegex(RegexCache, pattern, common.MaxTriggerRegexProgramSize)
 	if re == nil {
 		return false, "", nil
 	}

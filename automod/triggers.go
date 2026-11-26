@@ -62,20 +62,8 @@ func messageTexts(m *discordgo.Message, includeExtraText bool) []string {
 
 /////////////////////////////////////////////////////////////
 
-// compiledTriggerRegex returns nil for an invalid or too complex pattern, caching that too so it isn't
-// compiled again for every message.
 func compiledTriggerRegex(pattern string) *regexp.Regexp {
-	item, err := RegexCache.Fetch(pattern, time.Minute*10, func() (any, error) {
-		re, err := common.CompileUserRegex(pattern, common.MaxTriggerRegexProgramSize)
-		if err != nil {
-			return (*regexp.Regexp)(nil), nil
-		}
-		return re, nil
-	})
-	if err != nil {
-		return nil
-	}
-	return item.Value().(*regexp.Regexp)
+	return common.FetchUserRegex(RegexCache, pattern, common.MaxTriggerRegexProgramSize)
 }
 
 type BaseRegexTriggerData struct {

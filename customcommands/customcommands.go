@@ -23,14 +23,13 @@ import (
 	"github.com/botlabs-gg/yagpdb/v2/lib/dstate"
 	"github.com/botlabs-gg/yagpdb/v2/premium"
 	"github.com/botlabs-gg/yagpdb/v2/web"
-	"github.com/karlseguin/ccache"
 	"github.com/robfig/cron/v3"
 	"github.com/volatiletech/null/v8"
 	"github.com/volatiletech/sqlboiler/v4/queries/qm"
 )
 
 var (
-	RegexCache = *ccache.New(ccache.Configure())
+	RegexCache = common.NewUserRegexCache()
 	logger     = common.GetPluginLogger(&Plugin{})
 )
 
