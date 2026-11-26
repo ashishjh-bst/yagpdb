@@ -568,7 +568,7 @@ func (s *state) walkRange(dot reflect.Value, r *parse.RangeNode) controlFlowSign
 	case reflect.Invalid:
 		break // An invalid value is likely a nil map, etc. and acts like an empty map.
 	default:
-		s.errorf("range can't iterate over %v", val)
+		s.errorf("range can't iterate over %s", val.Type())
 	}
 	if r.ElseList != nil {
 		return s.walk(dot, r.ElseList)
@@ -1318,6 +1318,14 @@ var nonAllocatingFuncs = map[string]bool{
 	"Get":   true,
 }
 
+// These build a large slice out of a single argument, so their result is charged by its size. Other slice
+// results aren't, since appending in a loop would be charged the whole slice again on every iteration.
+var sliceAllocatingFuncs = map[string]bool{
+	"split":   true,
+	"toRune":  true,
+	"shuffle": true,
+}
+
 func (s *state) chargeAlloc(name string, result reflect.Value, args []reflect.Value) {
 	if s.tmpl.maxAllocBytes == 0 || nonAllocatingFuncs[name] {
 		return
@@ -1336,6 +1344,8 @@ func (s *state) chargeAlloc(name string, result reflect.Value, args []reflect.Va
 		}
 	case result.Kind() == reflect.Slice && result.Type().Elem().Kind() == reflect.Uint8:
 		size = result.Len()
+	case result.Kind() == reflect.Slice && sliceAllocatingFuncs[name]:
+		size = result.Len() * int(result.Type().Elem().Size())
 	}
 
 	if size > 0 {
